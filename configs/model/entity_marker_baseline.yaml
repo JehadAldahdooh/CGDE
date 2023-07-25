@@ -1,6 +1,9 @@
 _target_: drugprot.models.entity_marker_baseline.EntityMarkerBaseline
 
 transformer: /vol/fob-vol1/mi15/weberple/weberple/transformers/RoBERTa-large-PM-M3-Voc-hf
+# allenai/scibert_scivocab_uncased 
+# michiyasunaga/BioLinkBERT-base
+
 lr: 3e-5
 finetune_lr: 1e-5
 loss: bce
@@ -18,3 +21,6 @@ pair_side_information: null
 use_none_class: false
 entity_embeddings: null
 weight_decay: 0.0
+gene_entities: entrezGeneNCBI.tsv
+gene_features: Protein_features.csv
+use_entities: true

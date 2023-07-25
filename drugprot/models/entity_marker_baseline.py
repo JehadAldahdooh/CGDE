@@ -84,7 +84,7 @@ def sentence_to_examples(
 
             head_side_info = entity_to_side_information.get(head.infons["identifier"], "")
             tail_side_info = entity_to_side_information.get(tail.infons["identifier"], "")
-
+            
             if head_side_info and tail_side_info:
                 head_side_info = split_single(head_side_info)[0]
                 tail_side_info = split_single(tail_side_info)[0]
@@ -162,6 +162,14 @@ def sentence_to_examples(
             if label_to_id:
                 features["labels"] = np.zeros(len(label_to_id))
                 for label in pair_to_relations[(head.id, tail.id)]:
+                    if(label == 'NOT'):
+                        label = 'NONE'
+                    if(label == 'DOWNREGULATOR'):
+                        label = 'INDIRECT-DOWNREGULATOR'
+                    if(label == 'UPREGULATOR'):
+                        label = 'INDIRECT-UPREGULATOR'
+                    if(label == 'INDIRECT-REGULATOR'):
+                        label = 'DIRECT-REGULATOR'
                     features["labels"][label_to_id[label]] = 1
 
                 if use_none_class and features["labels"].sum() == 0:
@@ -171,6 +179,23 @@ def sentence_to_examples(
 
     return examples
 
+class FocalLoss(nn.Module):
+    """
+    :eps: Focusing parameter. eps=0 is equivalent to BCE_loss
+    """
+    def __init__(self, l=0.5, eps=1e-6, **_):
+        super(FocalLoss, self).__init__()
+        self.l = l
+        self.eps = eps
+
+    def forward(self, logits, labels, **_):
+        labels = labels.view(-1)
+        probs = torch.sigmoid(logits).view(-1)
+
+        losses = -(labels * torch.pow((1. - probs), self.l) * torch.log(probs + self.eps) + \
+                   (1. - labels) * torch.pow(probs, self.l) * torch.log(1. - probs + self.eps))
+        loss = torch.mean(losses)
+        return loss
 
 class ATLoss(nn.Module):
     def __init__(self):
@@ -449,6 +474,7 @@ class EntityMarkerBaseline(pl.LightningModule):
         mark_with_special_tokens: bool = True,
         blind_entities: bool = False,
         entity_side_information = None,
+        gene_entities = None,
         pair_side_information = None,
         use_none_class = True,
         entity_embeddings = None,
@@ -459,6 +485,15 @@ class EntityMarkerBaseline(pl.LightningModule):
         self.weight_decay = weight_decay
         self.use_none_class = use_none_class
         self.entity_side_information = {}
+        self.gene_entities = {}
+        if gene_entities is not None:
+            with open(hydra.utils.to_absolute_path(Path("data") / "side_information" / gene_entities)) as f:
+                for line in f:
+                    try:
+                        gene_id, gene_info = line.strip("\n").split("\t")
+                        self.gene_entities[gene_id] = gene_info
+                    except:
+                        pass
         if entity_side_information is not None:
             with open(hydra.utils.to_absolute_path(Path("data") / "side_information" / entity_side_information)) as f:
                 for line in f:
@@ -493,8 +528,8 @@ class EntityMarkerBaseline(pl.LightningModule):
         if loss == "atlop":
             self.loss = ATLoss()
         else:
-            self.loss = nn.BCEWithLogitsLoss()
-
+            # self.loss = nn.BCEWithLogitsLoss()
+            self.loss = FocalLoss()
         self.tune_thresholds = tune_thresholds
         if self.tune_thresholds and isinstance(self.loss, ATLoss):
             warnings.warn(
@@ -723,6 +758,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                             mark_with_special_tokens=self.mark_with_special_tokens,
                             blind_entities=self.blind_entities,
                             entity_to_side_information=self.entity_side_information,
+                            gene_entities = self.gene_entities,
                             pair_to_side_information=self.pair_side_information,
                             entity_to_embedding_index=self.entity_to_embedding_index
                         )
@@ -737,6 +773,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                             mark_with_special_tokens=self.mark_with_special_tokens,
                             blind_entities=self.blind_entities,
                             entity_to_side_information=self.entity_side_information,
+                            gene_entities = self.gene_entities,
                             pair_to_side_information=self.pair_side_information,
                         entity_to_embedding_index=self.entity_to_embedding_index
                         )
@@ -773,6 +810,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                                blind_entities=self.blind_entities,
                                max_length=self.max_length,
                                entity_to_side_information=self.entity_side_information,
+                               gene_entities = self.gene_entities,
                                pair_to_side_information=self.pair_side_information,
                                use_none_class=self.use_none_class,
                                entity_to_embedding_index=self.entity_to_embedding_index

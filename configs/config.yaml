@@ -36,7 +36,7 @@ print_config: True
 # disable python warnings if they annoy you
 ignore_warnings: True
 
-seed: 42
+seed: 42 #0, 2, 3, 4, 5, 7
 checkpoint: null
 
 batch_size: 32
