@@ -40,7 +40,7 @@ class MultitaskClassifierOutput(ModelOutput):
 
 def sentence_to_examples(
     sentence, tokenizer, doc_context, pair_types, mark_with_special_tokens, blind_entities, label_to_id=None, max_length=512, use_none_class=False,
-        entity_to_side_information=None, pair_to_side_information=None, entity_to_embedding_index=None
+        entity_to_side_information=None, gene_entities = None, gene_features = None, pair_to_side_information=None, entity_to_embedding_index=None
 ):
     examples = []
 
@@ -90,6 +90,21 @@ def sentence_to_examples(
                 tail_side_info = split_single(tail_side_info)[0]
 
             side_info = f"{pair_side_info} | {head_side_info} | {tail_side_info} [SEP]"
+
+            # fetach the gene data
+            head_side_info_gene = ""
+            tail_side_info_gene = ""            
+            if(head.infons["type"] == 'GENE' or head.infons["type"] == 'GENE-Y' or head.infons["type"] == 'GENE-N'):
+                head_side_info_gene = gene_entities.get(head.infons["identifier"], "")
+            if(tail.infons["type"] == 'GENE' or tail.infons["type"] == 'GENE-Y' or tail.infons["type"] == 'GENE-N'):
+                ids = tail.infons["identifier"].split('|')
+                if(len(ids)>1):
+                    for id in ids:
+                        tail_side_info_gene = gene_entities.get(id, "")
+                        if(tail_side_info_gene):
+                            break
+                else:
+                    tail_side_info_gene = gene_entities.get(tail.infons["identifier"], "")
 
             if mark_with_special_tokens:
                 marker = "[HEAD-E]"
@@ -175,7 +190,72 @@ def sentence_to_examples(
                 if use_none_class and features["labels"].sum() == 0:
                     features["labels"][0] = 1
 
-            examples.append({"head": head.id, "tail": tail.id, "features": features})
+            # examples.append({"head": head.id, "tail": tail.id, "features": features})
+
+
+            side_info_gene = f"{head_side_info_gene} | {tail_side_info_gene} [SEP]"
+            features_side_gene = tokenizer.encode_plus(
+                side_info_gene, max_length=len_remaining, truncation="longest_first", add_special_tokens=False
+            )
+
+            features_gene = None
+            if gene_id.isdigit():
+                gene_id = gene_id
+                values = gene_features.get(gene_id, [])
+                if not values:
+                    values = [0] * 576
+            
+                features_gene = {
+                    "input_ids": features_text.input_ids + features_side_gene.input_ids,
+                    "attention_mask": features_text.attention_mask + features_side_gene.attention_mask,
+                    "embeddings": values / (np.linalg.norm(values, ord=2) + 1e-8) #np.linalg.norm(values, ord=2)
+                }
+            else:
+                values = [0] * 576
+                features_gene = {
+                    "input_ids": features_text.input_ids + features_side_gene.input_ids,
+                    "attention_mask": features_text.attention_mask + features_side_gene.attention_mask,
+                    "embeddings": values
+                }
+
+            if "token_type_ids" in features_text:
+                features_gene["token_type_ids"] = [0] * len(features_text.input_ids) + [1] * len(features_side_gene.input_ids)
+
+            if mark_with_special_tokens:
+                try:
+                    assert "HEAD-S" in tokenizer.decode(features_gene["input_ids"])
+                    assert "HEAD-E" in tokenizer.decode(features_gene["input_ids"])
+                    assert "TAIL-S" in tokenizer.decode(features_gene["input_ids"])
+                    assert "TAIL-E" in tokenizer.decode(features_gene["input_ids"])
+                except AssertionError:
+                    log.warning("Truncated entity")
+                    continue  # entity was truncated
+
+            if entity_to_embedding_index:
+                features_gene["e1_embedding_index"] = entity_to_embedding_index.get("MESH:" + head.infons["identifier"].split("|")[0], -1) + 1
+                features_gene["e2_embedding_index"] = entity_to_embedding_index.get("NCBI:" + tail.infons["identifier"].split("|")[0], -1) + 1
+
+            if label_to_id:
+                features_gene["labels"] = np.zeros(len(label_to_id))
+                for label in pair_to_relations[(head.id, tail.id)]:
+                    if(label == 'NOT'):
+                        label = 'NONE'
+                    if(label == 'DOWNREGULATOR'):
+                        label = 'INDIRECT-DOWNREGULATOR'
+                    if(label == 'UPREGULATOR'):
+                        label = 'INDIRECT-UPREGULATOR'
+                    if(label == 'INDIRECT-REGULATOR'):
+                        label = 'DIRECT-REGULATOR'
+
+
+                    features_gene["labels"][label_to_id[label]] = 1
+
+                if use_none_class and features_gene["labels"].sum() == 0:
+                    features_gene["labels"][0] = 1
+
+            examples.append({"head": head.id, "tail": tail.id, "features": features_gene})
+
+
 
     return examples
 
@@ -475,6 +555,8 @@ class EntityMarkerBaseline(pl.LightningModule):
         blind_entities: bool = False,
         entity_side_information = None,
         gene_entities = None,
+        gene_features = None,
+        use_features: bool = False,
         pair_side_information = None,
         use_none_class = True,
         entity_embeddings = None,
@@ -486,6 +568,17 @@ class EntityMarkerBaseline(pl.LightningModule):
         self.use_none_class = use_none_class
         self.entity_side_information = {}
         self.gene_entities = {}
+        self.gene_features = {}
+
+        if gene_features is not None:
+            with open(hydra.utils.to_absolute_path(Path("data") / "side_information" / gene_features)) as tsv_file:
+                next(tsv_file)
+                for row in tsv_file:
+                    values = row.strip("\n").split("\t")
+                    key = values[0]
+                    #embeddings = "\t".join(values[2:])
+                    embeddings = [float(v) for v in values[2:]] # convert values to float and store as array
+                    self.gene_features[key] = embeddings
         if gene_entities is not None:
             with open(hydra.utils.to_absolute_path(Path("data") / "side_information" / gene_entities)) as f:
                 for line in f:
@@ -514,6 +607,7 @@ class EntityMarkerBaseline(pl.LightningModule):
         self.use_ends = use_ends
         self.mark_with_special_tokens = mark_with_special_tokens
         self.blind_entities = blind_entities
+        self.use_features = use_features
 
         assert use_cls or use_starts or use_ends
 
@@ -524,7 +618,7 @@ class EntityMarkerBaseline(pl.LightningModule):
 
         self.dataset_to_meta = dataset_to_meta
         loss = loss.lower().strip()
-        assert loss in {"atlop", "bce"}
+        assert loss in {"atlop", "bce", "focal"}
         if loss == "atlop":
             self.loss = ATLoss()
         else:
@@ -557,6 +651,8 @@ class EntityMarkerBaseline(pl.LightningModule):
             seq_rep_size += 2 * self.transformer.config.hidden_size
         if use_ends:
             seq_rep_size += 2 * self.transformer.config.hidden_size
+        if use_features:
+            seq_rep_size += 1 * 576
         if entity_embeddings:
             entity_embeddings = Path(entity_embeddings)
             with open(entity_embeddings / "embeddings.pkl", "rb") as f:
@@ -654,6 +750,10 @@ class EntityMarkerBaseline(pl.LightningModule):
             end_pair_rep = torch.cat([head_end_rep, tail_end_rep], dim=1)
             seq_reps.append(end_pair_rep)
 
+        if self.use_features:
+            geneFeatures = features['embeddings']
+            seq_reps.append(geneFeatures)
+        
         seq_reps = torch.cat(seq_reps, dim=1)
         if self.entity_embeddings:
             e1_embeddings = self.entity_embeddings(features["e1_embedding_index"])
@@ -759,6 +859,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                             blind_entities=self.blind_entities,
                             entity_to_side_information=self.entity_side_information,
                             gene_entities = self.gene_entities,
+                            gene_features = self.gene_features,
                             pair_to_side_information=self.pair_side_information,
                             entity_to_embedding_index=self.entity_to_embedding_index
                         )
@@ -774,6 +875,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                             blind_entities=self.blind_entities,
                             entity_to_side_information=self.entity_side_information,
                             gene_entities = self.gene_entities,
+                            gene_features = self.gene_features,
                             pair_to_side_information=self.pair_side_information,
                         entity_to_embedding_index=self.entity_to_embedding_index
                         )
@@ -811,6 +913,7 @@ class EntityMarkerBaseline(pl.LightningModule):
                                max_length=self.max_length,
                                entity_to_side_information=self.entity_side_information,
                                gene_entities = self.gene_entities,
+                               gene_features = self.gene_features,
                                pair_to_side_information=self.pair_side_information,
                                use_none_class=self.use_none_class,
                                entity_to_embedding_index=self.entity_to_embedding_index
