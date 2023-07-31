@@ -1,5 +1,7 @@
 # Mining drug-target interactions from biomedical literature using chemical and gene descriptions based ensemble transformer model
 
+This code is based on the original work by leonweber/drugprot. You can find the original repository at https://github.com/leonweber/drugprot.
+
 ## Installation
 
 To set up the project environment, you can use `pip3` to install the required packages. Run the following commands to install the necessary dependencies:
